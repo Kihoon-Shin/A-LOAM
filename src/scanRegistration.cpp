@@ -35,27 +35,36 @@
 // POSSIBILITY OF SUCH DAMAGE.
 
 
-#include <cmath>
-#include <vector>
-#include <string>
-#include "aloam_velodyne/common.h"
-#include "aloam_velodyne/tic_toc.h"
-#include <nav_msgs/Odometry.h>
-#include <opencv/cv.h>
+// #include <cmath>
+// #include <vector>
+// #include <string>
+// #include "aloam_velodyne/common.h"
+// #include "aloam_velodyne/tic_toc.h"
+// #include <nav_msgs/Odometry.h>
+// #include <opencv/cv.h>
+// #include <pcl_conversions/pcl_conversions.h>
+// #include <pcl/point_cloud.h>
+// #include <pcl/point_types.h>
+// #include <pcl/filters/voxel_grid.h>
+// #include <pcl/kdtree/kdtree_flann.h>
+// #include <ros/ros.h>
+// #include <sensor_msgs/Imu.h>
+// #include <sensor_msgs/PointCloud2.h>
+// #include <tf/transform_datatypes.h>
+// #include <tf/transform_broadcaster.h>
+
 #include <pcl_conversions/pcl_conversions.h>
-#include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
+#include <pcl/PCLPointCloud2.h>
+#include <pcl/conversions.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/kdtree/kdtree_flann.h>
-#include <ros/ros.h>
-#include <sensor_msgs/Imu.h>
-#include <sensor_msgs/PointCloud2.h>
-#include <tf/transform_datatypes.h>
-#include <tf/transform_broadcaster.h>
+#include "aloam_velodyne/common.h"
+#include "aloam_velodyne/tic_toc.h"
 
-using std::atan2;
-using std::cos;
-using std::sin;
+// using std::atan2;
+// using std::cos;
+// using std::sin;
 
 const double scanPeriod = 0.1;
 
@@ -133,10 +142,11 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
     pcl::fromROSMsg(*laserCloudMsg, laserCloudIn);
     std::vector<int> indices;
 
+    // First filter the point cloud to remove invalid point clouds with NaN values ​​and points within the MINIMUM_RANGE distance from the origin of the Lidar coordinate system.
     pcl::removeNaNFromPointCloud(laserCloudIn, laserCloudIn, indices);
     removeClosedPointCloud(laserCloudIn, laserCloudIn, MINIMUM_RANGE);
 
-
+    //Calculate the horizontal angle between the starting point and the end point, and the angle with the x-axis. Since the lidar rotates clockwise, inverting it here is equivalent to turning it counterclockwise.
     int cloudSize = laserCloudIn.points.size();
     float startOri = -atan2(laserCloudIn.points[0].y, laserCloudIn.points[0].x);
     float endOri = -atan2(laserCloudIn.points[cloudSize - 1].y,
@@ -163,11 +173,14 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
         point.y = laserCloudIn.points[i].y;
         point.z = laserCloudIn.points[i].z;
 
+        //Calculate the horizontal angle between the starting point and the end point, and the angle with the x-axis. Since the lidar rotates clockwise, inverting it here is equivalent to turning it counterclockwise.
         float angle = atan(point.z / sqrt(point.x * point.x + point.y * point.y)) * 180 / M_PI;
-        int scanID = 0;
+        int scanID = 0; //The id of the harness
 
+      //Calculate which wire harness scan is
         if (N_SCANS == 16)
         {
+          //The vertical is 30 degrees. The angle between each line is 2 degrees.
             scanID = int((angle + 15) / 2 + 0.5);
             if (scanID > (N_SCANS - 1) || scanID < 0)
             {
@@ -205,7 +218,9 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
         }
         //printf("angle %f scanID %d \n", angle, scanID);
 
+      //Calculate horizontal angle
         float ori = -atan2(point.y, point.x);
+      /* Place the calculated horizontal angle within a reasonable range of the start angle and end angle */
         if (!halfPassed)
         { 
             if (ori < startOri - M_PI / 2)
@@ -216,7 +231,7 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
             {
                 ori -= 2 * M_PI;
             }
-
+          //If it exceeds 180, it means it is halfway through
             if (ori - startOri > M_PI)
             {
                 halfPassed = true;
@@ -235,89 +250,125 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
             }
         }
 
+      // The calculation of the angle is to calculate the relative starting time and
+      // is used for point cloud distortion compensation.
         float relTime = (ori - startOri) / (endOri - startOri);
+      //Calculate the ratio of the current point between the start and the end
+      //The integer part is the ID of the sacn, and the decimal part is the time relative to the starting time
         point.intensity = scanID + scanPeriod * relTime;
         laserCloudScans[scanID].push_back(point); 
     }
-    
+    // The number of currently valid point clouds
     cloudSize = count;
     printf("points size %d \n", cloudSize);
 
     pcl::PointCloud<PointType>::Ptr laserCloud(new pcl::PointCloud<PointType>());
+  //Process each scan. The starting id of the point on each scan is not required for the first 5 points, and the ending id is not required for the last 6 points.
     for (int i = 0; i < N_SCANS; i++)
     { 
-        scanStartInd[i] = laserCloud->size() + 5;
+        scanStartInd[i] = laserCloud->size() + 5; //Record the starting index of each scan, ignore the first 5 points
         *laserCloud += laserCloudScans[i];
-        scanEndInd[i] = laserCloud->size() - 6;
+        scanEndInd[i] = laserCloud->size() - 6; // Record the end index of each scan and ignore the last 5 points. Point cloud scans at the beginning and end are prone to unclosed "seams", which is detrimental to edge feature extraction.
     }
 
     printf("prepare time %f \n", t_prepare.toc());
 
+  //Calculate curvature
     for (int i = 5; i < cloudSize - 5; i++)
     { 
         float diffX = laserCloud->points[i - 5].x + laserCloud->points[i - 4].x + laserCloud->points[i - 3].x + laserCloud->points[i - 2].x + laserCloud->points[i - 1].x - 10 * laserCloud->points[i].x + laserCloud->points[i + 1].x + laserCloud->points[i + 2].x + laserCloud->points[i + 3].x + laserCloud->points[i + 4].x + laserCloud->points[i + 5].x;
         float diffY = laserCloud->points[i - 5].y + laserCloud->points[i - 4].y + laserCloud->points[i - 3].y + laserCloud->points[i - 2].y + laserCloud->points[i - 1].y - 10 * laserCloud->points[i].y + laserCloud->points[i + 1].y + laserCloud->points[i + 2].y + laserCloud->points[i + 3].y + laserCloud->points[i + 4].y + laserCloud->points[i + 5].y;
         float diffZ = laserCloud->points[i - 5].z + laserCloud->points[i - 4].z + laserCloud->points[i - 3].z + laserCloud->points[i - 2].z + laserCloud->points[i - 1].z - 10 * laserCloud->points[i].z + laserCloud->points[i + 1].z + laserCloud->points[i + 2].z + laserCloud->points[i + 3].z + laserCloud->points[i + 4].z + laserCloud->points[i + 5].z;
 
+       //Storage curvature, index
         cloudCurvature[i] = diffX * diffX + diffY * diffY + diffZ * diffZ;
+      //Save the index of the original point because it will be sorted later
         cloudSortInd[i] = i;
-        cloudNeighborPicked[i] = 0;
+      //These two are flags
+        cloudNeighborPicked[i] = 0; //When this flag is set to 1, it means that this point is selected as a feature point.
         cloudLabel[i] = 0;
+                            // Label 2: corner_sharp
+                            // Label 1: corner_less_sharp,
+                            // Label -1: surf_flat
+                            // Label 0: surf_less_flat，
     }
 
 
     TicToc t_pts;
 
-    pcl::PointCloud<PointType> cornerPointsSharp;
-    pcl::PointCloud<PointType> cornerPointsLessSharp;
-    pcl::PointCloud<PointType> surfPointsFlat;
-    pcl::PointCloud<PointType> surfPointsLessFlat;
+  //Declare the point cloud of feature points
+    pcl::PointCloud<PointType> cornerPointsSharp; //Corner feature point cloud
+    pcl::PointCloud<PointType> cornerPointsLessSharp; //Weak corner point feature point cloud
+    pcl::PointCloud<PointType> surfPointsFlat; //Point feature point cloud
+    pcl::PointCloud<PointType> surfPointsLessFlat; //Weak point feature point cloud
 
     float t_q_sort = 0;
+   //Traverse each scan
     for (int i = 0; i < N_SCANS; i++)
     {
+      // If there are no valid points, continue
         if( scanEndInd[i] - scanStartInd[i] < 6)
             continue;
+      //Used to store uneven points without voxel filtering
         pcl::PointCloud<PointType>::Ptr surfPointsLessFlatScan(new pcl::PointCloud<PointType>);
+      // Divide each scan into 6 equal parts and calculate the feature points inside
         for (int j = 0; j < 6; j++)
         {
-            int sp = scanStartInd[i] + (scanEndInd[i] - scanStartInd[i]) * j / 6; 
-            int ep = scanStartInd[i] + (scanEndInd[i] - scanStartInd[i]) * (j + 1) / 6 - 1;
+          // Calculate the id of each starting point and end point of the equal parts
+            int sp = scanStartInd[i] + (scanEndInd[i] - scanStartInd[i]) * j / 6; //Start index of subscan
+            int ep = scanStartInd[i] + (scanEndInd[i] - scanStartInd[i]) * (j + 1) / 6 - 1; //End index of subscan
 
-            TicToc t_tmp;
+            TicToc t_tmp; //Used to calculate time
+
+          // Sort the point cloud according to curvature, with small ones in front and big ones in the back
             std::sort (cloudSortInd + sp, cloudSortInd + ep + 1, comp);
-            t_q_sort += t_tmp.toc();
+          
+            t_q_sort += t_tmp.toc(); //calculating time
 
-            int largestPickedNum = 0;
-            for (int k = ep; k >= sp; k--)
+            int largestPickedNum = 0; //Select the largest number of curvature feature points, that is, the number of corner points
+            for (int k = ep; k >= sp; k--) // Extract corner features from back to front, that is, starting from the point with large curvature
             {
+              //The order will be messed up after sorting. Use the previously saved index value to get the id of the point.
                 int ind = cloudSortInd[k]; 
 
+              //1 Check whether this point is a valid point and whether the curvature is greater than the threshold
                 if (cloudNeighborPicked[ind] == 0 &&
-                    cloudCurvature[ind] > 0.1)
+                    cloudCurvature[ind] > 0.1) // If the point has not been selected and the curvature is greater than 0.1
                 {
 
+                  //2 If the requirements are met, the number of selected corner points is increased by 1
                     largestPickedNum++;
+
+                  //Select 2 points with the largest curvature in each segment
                     if (largestPickedNum <= 2)
                     {                        
+                      //3 label 2 is a mark with large curvature
                         cloudLabel[ind] = 2;
+                      //4 cornerPointsSharp stores points with large curvature
                         cornerPointsSharp.push_back(laserCloud->points[ind]);
+                      //cornerPointsLessSharp stores points with slightly larger curvature
                         cornerPointsLessSharp.push_back(laserCloud->points[ind]);
                     }
+                      //5 and 20 points with slightly larger curvatures
                     else if (largestPickedNum <= 20)
                     {                        
+                      // 6 label is 1, which is a mark with slightly larger curvature.
                         cloudLabel[ind] = 1; 
                         cornerPointsLessSharp.push_back(laserCloud->points[ind]);
                     }
+                      //If there are more than 20, we don’t want them.
                     else
                     {
                         break;
                     }
+                  
+                  //8 After this point is selected, the pick mark position is 1
+                    cloudNeighborPicked[ind] = 1;  // Mark the point as selected
 
-                    cloudNeighborPicked[ind] = 1; 
-
+                  //9 In order to ensure that the feature points are not overly concentrated, set all 5 points around the selected point to 1 to avoid subsequent selections.
                     for (int l = 1; l <= 5; l++)
                     {
+                      //Check whether the distance between adjacent points is too different. If the difference is too big, it means that the point cloud is discontinuous here. It is a feature edge, which is a new feature and will not be set.
                         float diffX = laserCloud->points[ind + l].x - laserCloud->points[ind + l - 1].x;
                         float diffY = laserCloud->points[ind + l].y - laserCloud->points[ind + l - 1].y;
                         float diffZ = laserCloud->points[ind + l].z - laserCloud->points[ind + l - 1].z;
@@ -343,6 +394,7 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
                 }
             }
 
+          // Extract the surf plane feature, similar to the above, select the first 4 points with the smallest curvature of the subscan as surf_flat
             int smallestPickedNum = 0;
             for (int k = sp; k <= ep; k++)
             {
@@ -355,10 +407,11 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
                     cloudLabel[ind] = -1; 
                     surfPointsFlat.push_back(laserCloud->points[ind]);
 
+                  //Select 4 pastry points
                     smallestPickedNum++;
                     if (smallestPickedNum >= 4)
                     { 
-                        break;
+                        break; //When the number is enough, jump out of the loop
                     }
 
                     cloudNeighborPicked[ind] = 1;
@@ -389,6 +442,7 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
                 }
             }
 
+          //Other non-corner feature points and surf_flat feature points together form surf_less_flat feature points
             for (int k = sp; k <= ep; k++)
             {
                 if (cloudLabel[k] <= 0)
@@ -398,6 +452,7 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
             }
         }
 
+      //Perform voxel filtering on weak surface points because the rest are weak surface points, so there are a lot of points.
         pcl::PointCloud<PointType> surfPointsLessFlatScanDS;
         pcl::VoxelGrid<PointType> downSizeFilter;
         downSizeFilter.setInputCloud(surfPointsLessFlatScan);
@@ -410,18 +465,21 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
     printf("seperate points time %f \n", t_pts.toc());
 
 
+  //Publish all point clouds
     sensor_msgs::PointCloud2 laserCloudOutMsg;
     pcl::toROSMsg(*laserCloud, laserCloudOutMsg);
     laserCloudOutMsg.header.stamp = laserCloudMsg->header.stamp;
     laserCloudOutMsg.header.frame_id = "/camera_init";
     pubLaserCloud.publish(laserCloudOutMsg);
 
+  //Publish corner points
     sensor_msgs::PointCloud2 cornerPointsSharpMsg;
     pcl::toROSMsg(cornerPointsSharp, cornerPointsSharpMsg);
     cornerPointsSharpMsg.header.stamp = laserCloudMsg->header.stamp;
     cornerPointsSharpMsg.header.frame_id = "/camera_init";
     pubCornerPointsSharp.publish(cornerPointsSharpMsg);
 
+  //Publish weak corner points
     sensor_msgs::PointCloud2 cornerPointsLessSharpMsg;
     pcl::toROSMsg(cornerPointsLessSharp, cornerPointsLessSharpMsg);
     cornerPointsLessSharpMsg.header.stamp = laserCloudMsg->header.stamp;
